@@ -15,24 +15,23 @@ class _MessageWrapper:
     def __init__(self, chain):
         self.chain = chain
 
-@register("astrbot_plugin_lolicon_timer", "YHJM", "定时发送Lolicon二次元图片", "1.0.0")
+@register("astrbot_plugin_lolicon_timer", "YHJM", "定时发送Lolicon二次元图片（支持渲染）", "2.0.0")
 class LoliconTimerPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         self.config = config if isinstance(config, dict) else {}
         self.tasks = self.config.get("tasks", [])
         self.debug = self.config.get("debug_mode", False)
+        self.image_size = self.config.get("image_size", "regular")
+        self.render_template = self.config.get("render_template", "")
 
-        # 共享 HTTP 会话
         self._session = None
-
-        # 启动定时任务
         self._my_tasks = []
         for i, task in enumerate(self.tasks):
             t = asyncio.create_task(self._run_task(i, task))
             self._my_tasks.append(t)
 
-        logger.info(f"[LoliconTimer] 已加载 {len(self.tasks)} 个任务")
+        logger.info(f"[LoliconTimer] 已加载 {len(self.tasks)} 个任务，尺寸={self.image_size}")
 
     def _log(self, msg: str, level: str = "info"):
         if self.debug or level != "debug":
@@ -43,8 +42,8 @@ class LoliconTimerPlugin(Star):
             self._session = aiohttp.ClientSession()
         return self._session
 
-    async def _fetch_image(self) -> Optional[bytes]:
-        """从 Lolicon API 获取图片二进制数据"""
+    async def _fetch_image_and_meta(self) -> Optional[tuple]:
+        """获取图片二进制和元数据 (img_bytes, meta_dict)"""
         api_url = "https://api.lolicon.app/setu/v2?r18=0&num=1"
         session = await self._get_session()
         try:
@@ -56,25 +55,61 @@ class LoliconTimerPlugin(Star):
                 if self.debug:
                     self._log(f"API 返回数据: {json.dumps(data, ensure_ascii=False)[:300]}", "debug")
                 
-                # 提取图片 URL
-                img_url = None
-                if isinstance(data, dict) and 'data' in data and isinstance(data['data'], list) and len(data['data']) > 0:
-                    first = data['data'][0]
-                    if isinstance(first, dict) and 'urls' in first and isinstance(first['urls'], dict):
-                        img_url = first['urls'].get('original') or first['urls'].get('regular')
+                if not isinstance(data, dict) or 'data' not in data or not data['data']:
+                    self._log("API 返回数据为空", "error")
+                    return None
+                first = data['data'][0]
+                urls = first.get('urls', {})
+                size = self.image_size
+                img_url = urls.get(size) or urls.get('regular') or urls.get('original')
                 if not img_url:
-                    self._log("无法从 JSON 提取图片 URL", "error")
+                    self._log("无法提取图片 URL", "error")
                     return None
                 
                 # 下载图片
                 async with session.get(img_url) as img_resp:
-                    if img_resp.status == 200:
-                        return await img_resp.read()
-                    else:
+                    if img_resp.status != 200:
                         self._log(f"图片下载失败 {img_resp.status}", "error")
                         return None
+                    img_bytes = await img_resp.read()
+                    # 提取元数据
+                    meta = {
+                        'title': first.get('title', ''),
+                        'author': first.get('author', ''),
+                        'pid': first.get('pid', ''),
+                        'tags': ', '.join(first.get('tags', [])),
+                        'r18': first.get('r18', False),
+                    }
+                    return img_bytes, meta
         except Exception as e:
             self._log(f"请求异常: {e}", "error")
+            return None
+
+    async def _render_image(self, img_bytes: bytes, meta: dict) -> Optional[str]:
+        """使用 HTML 模板渲染图片（返回图片 URL）"""
+        template = self.render_template
+        if not template:
+            self._log("渲染模板为空，使用纯图模式", "warning")
+            return None
+
+        # 将图片转为 base64 内联
+        import base64
+        b64 = base64.b64encode(img_bytes).decode('utf-8')
+        bg_data = f"data:image/png;base64,{b64}"  # 假设 png，实际可能 jpg，但浏览器可识别
+
+        # 替换占位符
+        html = template.replace("{{background}}", bg_data)
+        html = html.replace("{{title}}", meta.get('title', ''))
+        html = html.replace("{{author}}", meta.get('author', ''))
+        html = html.replace("{{pid}}", str(meta.get('pid', '')))
+        html = html.replace("{{tags}}", meta.get('tags', ''))
+        # 可自定义更多占位符
+
+        try:
+            image_url = await self.html_render(html, {"full_page": True})
+            return image_url
+        except Exception as e:
+            self._log(f"HTML 渲染失败: {e}", "error")
             return None
 
     async def _execute_task(self, task: Dict[str, Any]):
@@ -83,12 +118,25 @@ class LoliconTimerPlugin(Star):
             self._log("任务缺少 umo", "error")
             return
 
-        img_bytes = await self._fetch_image()
-        if not img_bytes:
+        result = await self._fetch_image_and_meta()
+        if not result:
             self._log("获取图片失败", "error")
             return
+        img_bytes, meta = result
 
-        msg_chain = [Image.fromBytes(img_bytes)]
+        enable_render = task.get("enable_render", False)
+        msg_chain = []
+
+        if enable_render and self.render_template:
+            rendered_url = await self._render_image(img_bytes, meta)
+            if rendered_url:
+                msg_chain = [Image.fromURL(rendered_url)]
+            else:
+                self._log("渲染失败，回退到纯图", "warning")
+                msg_chain = [Image.fromBytes(img_bytes)]
+        else:
+            msg_chain = [Image.fromBytes(img_bytes)]
+
         if task.get("at_all", False):
             msg_chain.insert(0, At(qq="all"))
 
@@ -139,7 +187,6 @@ class LoliconTimerPlugin(Star):
 
     @filter.command("lolicon_send")
     async def send_cmd(self, event, task_index: str = None):
-        """手动触发任务（序号从1开始），不填则执行第一个"""
         admins = self.context.get_config().get("admins_id", [])
         if str(event.get_sender_id()) not in admins:
             yield event.plain_result("权限不足")
@@ -176,6 +223,8 @@ class LoliconTimerPlugin(Star):
             self.config = {}
         self.tasks = self.config.get("tasks", [])
         self.debug = self.config.get("debug_mode", False)
+        self.image_size = self.config.get("image_size", "regular")
+        self.render_template = self.config.get("render_template", "")
         self._my_tasks = []
         for i, task in enumerate(self.tasks):
             t = asyncio.create_task(self._run_task(i, task))
