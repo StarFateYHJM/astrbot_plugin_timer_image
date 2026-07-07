@@ -26,9 +26,7 @@ class TimerImagePlugin(Star):
         self.tasks = self.config.get("tasks", [])
         self.debug = self.config.get("debug_mode", False)
 
-        # 共享 aiohttp 会话（复用连接，减少资源）
         self._session = None
-
         self._init_paths()
         self._my_tasks = []
         for i, task in enumerate(self.tasks):
@@ -37,7 +35,6 @@ class TimerImagePlugin(Star):
 
         logger.info(f"[TimerImage] 已加载 {len(self.tasks)} 个任务")
 
-    # ---------- 初始化目录 ----------
     def _init_paths(self):
         from astrbot.core.utils.astrbot_path import get_astrbot_data_path
         path = get_astrbot_data_path()
@@ -46,18 +43,15 @@ class TimerImagePlugin(Star):
         self.backgrounds_dir = self.data_dir / "backgrounds"
         self.backgrounds_dir.mkdir(exist_ok=True)
 
-    # ---------- 日志辅助 ----------
     def _log(self, msg: str, level: str = "info"):
         if self.debug or level != "debug":
             getattr(logger, level)(f"[TimerImage] {msg}")
 
-    # ---------- 获取共享会话 ----------
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
 
-    # ---------- 背景图解析 ----------
     def resolve_background(self, user_input: str) -> str:
         if not user_input:
             return ""
@@ -77,7 +71,6 @@ class TimerImagePlugin(Star):
             self._log(f"读取背景图失败: {e}", "error")
             return ""
 
-    # ---------- LLM 生成 ----------
     async def _generate_text(self, prompt: str) -> str:
         if not self.config.get("use_llm", False):
             return ""
@@ -108,7 +101,6 @@ class TimerImagePlugin(Star):
             self._log(f"LLM 调用失败: {e}", "error")
         return ""
 
-    # ---------- 渲染模式 ----------
     async def _render_image_from_template(self, task_cfg: Dict[str, Any]) -> Optional[str]:
         template = task_cfg.get("template", "")
         if not template:
@@ -126,25 +118,22 @@ class TimerImagePlugin(Star):
         if bg_data:
             html = html.replace("{{background}}", bg_data)
         try:
-            # 渲染时指定视口，避免生成过大图片
             image_url = await self.html_render(html, {"full_page": True})
             return image_url
         except Exception as e:
             self._log(f"渲染失败: {e}", "error")
             return None
 
-    # ---------- API 模式（内存优化：限制图片尺寸） ----------
     async def _fetch_image_from_api(self, task_cfg: Dict[str, Any]) -> Optional[bytes]:
         api_url = task_cfg.get("api_url")
         if not api_url:
             self._log("API 模式缺少 api_url", "error")
             return None
 
-        # 自动添加尺寸参数，减小内存占用（仅对 Lolicon 有效）
         if "lolicon.app" in api_url and "size" not in api_url:
             parsed = urllib.parse.urlparse(api_url)
             query = dict(urllib.parse.parse_qsl(parsed.query))
-            query["size"] = "regular"   # 可选: original, regular, small, thumb, mini
+            query["size"] = "regular"
             new_query = urllib.parse.urlencode(query)
             api_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
             self._log(f"添加尺寸参数后 URL: {api_url}", "debug")
@@ -164,7 +153,6 @@ class TimerImagePlugin(Star):
                         return None
                     if response_type == "json":
                         data = await resp.json()
-                        # 解析图片 URL
                         img_url = None
                         if image_key:
                             keys = image_key.split('.')
@@ -188,21 +176,17 @@ class TimerImagePlugin(Star):
                             if isinstance(data, str) and data.startswith("http"):
                                 img_url = data
                         if img_url:
-                            # 下载图片二进制（带流式读取）
                             async with session.get(img_url) as img_resp:
                                 if img_resp.status == 200:
-                                    # 使用 read() 读取全部，但可考虑流式写入磁盘，不过简单起见
                                     return await img_resp.read()
                         else:
                             self._log("无法从 JSON 提取图片 URL", "error")
                     else:
-                        # binary
                         return await resp.read()
         except Exception as e:
             self._log(f"API 请求异常: {e}", "error")
         return None
 
-    # ---------- 执行任务 ----------
     async def _execute_task(self, task: Dict[str, Any]):
         umo = task.get("umo", "")
         if not umo:
@@ -237,16 +221,13 @@ class TimerImagePlugin(Star):
         except Exception as e:
             self._log(f"发送失败: {e}", "error")
         finally:
-            # 释放大对象内存
             if msg_chain:
                 for item in msg_chain:
                     if hasattr(item, 'data') and isinstance(item.data, bytes):
                         del item.data
                 del msg_chain
-            # 强制垃圾回收（非必须，但有助于释放大块内存）
             gc.collect()
 
-    # ---------- 调度循环 ----------
     async def _run_task(self, idx: int, task: Dict[str, Any]):
         time_str = task.get("time", "")
         if not time_str:
@@ -272,19 +253,17 @@ class TimerImagePlugin(Star):
             self._log(f"执行任务 {idx} at {time_str}")
             await self._execute_task(task)
 
-    # ---------- 终止清理 ----------
     async def terminate(self):
         self._log("正在终止所有定时任务...")
         for t in getattr(self, '_my_tasks', []):
             t.cancel()
         if self._my_tasks:
             await asyncio.gather(*self._my_tasks, return_exceptions=True)
-        # 关闭共享会话
         if self._session and not self._session.closed:
             await self._session.close()
         self._log("所有任务已终止")
 
-    # ---------- 热重载命令 ----------
+    # ---------- 重载命令 ----------
     @filter.command("timerimage_reload")
     async def reload_cmd(self, event):
         admins = self.context.get_config().get("admins_id", [])
@@ -306,3 +285,32 @@ class TimerImagePlugin(Star):
             t = asyncio.create_task(self._run_task(i, task))
             self._my_tasks.append(t)
         yield event.plain_result(f"已重载，当前 {len(self.tasks)} 个任务")
+
+    # ---------- 手动触发命令 ----------
+    @filter.command("timerimage_send")
+    async def send_cmd(self, event, task_index: str = None):
+        """手动触发指定任务（序号从1开始），不填则执行第一个任务"""
+        admins = self.context.get_config().get("admins_id", [])
+        if str(event.get_sender_id()) not in admins:
+            yield event.plain_result("权限不足")
+            return
+
+        if not self.tasks:
+            yield event.plain_result("没有配置任何任务")
+            return
+
+        try:
+            idx = int(task_index) - 1 if task_index else 0
+        except ValueError:
+            yield event.plain_result("请输入有效的数字序号")
+            return
+
+        if idx < 0 or idx >= len(self.tasks):
+            yield event.plain_result(f"序号超出范围，共 {len(self.tasks)} 个任务")
+            return
+
+        task = self.tasks[idx]
+        self._log(f"手动触发任务 {idx+1}: {task.get('time')} -> {task.get('umo')}")
+
+        await self._execute_task(task)
+        yield event.plain_result(f"任务 {idx+1} 已触发，请等待发送结果")
