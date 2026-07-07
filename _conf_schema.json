@@ -41,9 +41,9 @@
             "description": "触发时间 (HH:MM)",
             "default": "09:00"
           },
-          "group_id": {
+          "umo": {
             "type": "string",
-            "description": "目标群号",
+            "description": "目标UMO（如：星恒梦落:GroupMessage:3384188179_1098977006）",
             "default": ""
           },
           "mode": {
