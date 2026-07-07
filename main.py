@@ -117,16 +117,16 @@ class LoliconTimerPlugin(Star):
         if not umo:
             self._log("任务缺少 umo", "error")
             return
-
+    
         result = await self._fetch_image_and_meta()
         if not result:
             self._log("获取图片失败", "error")
             return
         img_bytes, meta = result
-
+    
         enable_render = task.get("enable_render", False)
         msg_chain = []
-
+    
         if enable_render and self.render_template:
             rendered_url = await self._render_image(img_bytes, meta)
             if rendered_url:
@@ -136,19 +136,28 @@ class LoliconTimerPlugin(Star):
                 msg_chain = [Image.fromBytes(img_bytes)]
         else:
             msg_chain = [Image.fromBytes(img_bytes)]
-
+    
         if task.get("at_all", False):
             msg_chain.insert(0, At(qq="all"))
-
-        try:
-            wrapper = _MessageWrapper(msg_chain)
-            await self.context.send_message(umo, wrapper)
-            self._log(f"图片已发送至 {umo}")
-        except Exception as e:
-            self._log(f"发送失败: {e}", "error")
-        finally:
-            del img_bytes
-            gc.collect()
+    
+        # ---------- 发送重试机制 ----------
+        max_retries = 2  # 最多尝试3次（包括首次）
+        for attempt in range(max_retries + 1):
+            try:
+                wrapper = _MessageWrapper(msg_chain)
+                await self.context.send_message(umo, wrapper)
+                self._log(f"图片已发送至 {umo}")
+                break  # 成功则跳出循环
+            except Exception as e:
+                if attempt < max_retries:
+                    self._log(f"发送失败 (尝试 {attempt+1}/{max_retries+1}): {e}，2秒后重试...", "warning")
+                    await asyncio.sleep(2)
+                else:
+                    self._log(f"发送失败: {e}", "error")
+    
+        # 清理内存
+        del img_bytes
+        gc.collect()
 
     async def _run_task(self, idx: int, task: Dict[str, Any]):
         time_str = task.get("time", "")
