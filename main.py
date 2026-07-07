@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any
 import aiohttp
 from astrbot.api.star import Context, Star, register
 from astrbot.api.message_components import Image, Plain, At
+from astrbot.api.event import filter
 from astrbot.api import logger
 
 # ---------- 辅助包装类（兼容 context.send_message） ----------
