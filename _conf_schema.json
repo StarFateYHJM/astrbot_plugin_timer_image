@@ -1,29 +1,99 @@
 {
-  "debug_mode": true,
-  "use_llm": false,
-  "api_base": "https://api.deepseek.com/v1",
-  "api_key": "",
-  "model": "deepseek-v4-flash",
-  "system_prompt": "请用中文回复。",
-  "tasks": [
-    {
-      "time": "09:00",
-      "group_id": "123456789",
-      "mode": "render",
-      "template": "<html><body style='background: {{background}}; padding:40px;'><h1>早安！</h1><p>{{content}}</p></body></html>",
-      "background": "morning_bg.png",
-      "use_llm": true,
-      "prompt": "写一段清新的早安问候",
-      "at_all": false
+  "debug_mode": {
+    "type": "bool",
+    "description": "开启调试日志",
+    "default": false
+  },
+  "use_llm": {
+    "type": "bool",
+    "description": "全局开关：是否启用LLM生成",
+    "default": false
+  },
+  "api_base": {
+    "type": "string",
+    "description": "LLM API地址",
+    "default": "https://api.deepseek.com/v1"
+  },
+  "api_key": {
+    "type": "string",
+    "description": "LLM API密钥",
+    "default": ""
+  },
+  "model": {
+    "type": "string",
+    "description": "模型名称",
+    "default": "deepseek-v4-flash"
+  },
+  "system_prompt": {
+    "type": "text",
+    "description": "系统提示词",
+    "default": "请用中文回复。"
+  },
+  "tasks": {
+    "type": "template_list",
+    "description": "定时任务",
+    "templates": {
+      "default": {
+        "name": "新任务",
+        "items": {
+          "time": {
+            "type": "string",
+            "description": "触发时间 (HH:MM)",
+            "default": "09:00"
+          },
+          "group_id": {
+            "type": "string",
+            "description": "目标群号",
+            "default": ""
+          },
+          "mode": {
+            "type": "string",
+            "description": "模式: render(渲染) / api(API搬运)",
+            "default": "render"
+          },
+          "template": {
+            "type": "text",
+            "description": "渲染模式：HTML模板（含{{content}}、{{background}}占位符）",
+            "default": ""
+          },
+          "background": {
+            "type": "string",
+            "description": "渲染模式：背景图文件名（放backgrounds/目录）或URL",
+            "default": ""
+          },
+          "use_llm": {
+            "type": "bool",
+            "description": "渲染模式：是否使用LLM生成{{content}}",
+            "default": false
+          },
+          "prompt": {
+            "type": "text",
+            "description": "渲染模式：LLM提示词 / API模式的备用文案",
+            "default": ""
+          },
+          "api_url": {
+            "type": "string",
+            "description": "API模式：图片接口地址",
+            "default": ""
+          },
+          "api_response_type": {
+            "type": "string",
+            "description": "API模式: json 或 binary",
+            "default": "json"
+          },
+          "api_image_key": {
+            "type": "string",
+            "description": "API模式(json): 提取图片URL的字段路径 (如 data.0.urls.original)",
+            "default": ""
+          },
+          "at_all": {
+            "type": "bool",
+            "description": "是否@全体成员",
+            "default": false
+          }
+        }
+      }
     },
-    {
-      "time": "18:00",
-      "group_id": "987654321",
-      "mode": "api",
-      "api_url": "https://api.lolicon.app/setu/v2?r18=0",
-      "api_response_type": "json",
-      "api_image_key": "data.0.urls.original",
-      "at_all": false
-    }
-  ]
+    "default": []
+  }
 }
