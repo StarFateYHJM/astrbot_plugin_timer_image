@@ -2,6 +2,8 @@ import asyncio
 import json
 import base64
 import mimetypes
+import gc
+import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -24,6 +26,9 @@ class TimerImagePlugin(Star):
         self.tasks = self.config.get("tasks", [])
         self.debug = self.config.get("debug_mode", False)
 
+        # 共享 aiohttp 会话（复用连接，减少资源）
+        self._session = None
+
         self._init_paths()
         self._my_tasks = []
         for i, task in enumerate(self.tasks):
@@ -32,6 +37,7 @@ class TimerImagePlugin(Star):
 
         logger.info(f"[TimerImage] 已加载 {len(self.tasks)} 个任务")
 
+    # ---------- 初始化目录 ----------
     def _init_paths(self):
         from astrbot.core.utils.astrbot_path import get_astrbot_data_path
         path = get_astrbot_data_path()
@@ -40,10 +46,18 @@ class TimerImagePlugin(Star):
         self.backgrounds_dir = self.data_dir / "backgrounds"
         self.backgrounds_dir.mkdir(exist_ok=True)
 
+    # ---------- 日志辅助 ----------
     def _log(self, msg: str, level: str = "info"):
         if self.debug or level != "debug":
             getattr(logger, level)(f"[TimerImage] {msg}")
 
+    # ---------- 获取共享会话 ----------
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    # ---------- 背景图解析 ----------
     def resolve_background(self, user_input: str) -> str:
         if not user_input:
             return ""
@@ -63,6 +77,7 @@ class TimerImagePlugin(Star):
             self._log(f"读取背景图失败: {e}", "error")
             return ""
 
+    # ---------- LLM 生成 ----------
     async def _generate_text(self, prompt: str) -> str:
         if not self.config.get("use_llm", False):
             return ""
@@ -83,16 +98,17 @@ class TimerImagePlugin(Star):
             "max_tokens": 1024,
             "temperature": 0.8
         }
+        session = await self._get_session()
         try:
-            async with aiohttp.ClientSession() as sess:
-                async with sess.post(f"{api_base}/chat/completions", json=payload, headers=headers, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data["choices"][0]["message"]["content"].strip()
+            async with session.post(f"{api_base}/chat/completions", json=payload, headers=headers, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"].strip()
         except Exception as e:
             self._log(f"LLM 调用失败: {e}", "error")
         return ""
 
+    # ---------- 渲染模式 ----------
     async def _render_image_from_template(self, task_cfg: Dict[str, Any]) -> Optional[str]:
         template = task_cfg.get("template", "")
         if not template:
@@ -110,64 +126,83 @@ class TimerImagePlugin(Star):
         if bg_data:
             html = html.replace("{{background}}", bg_data)
         try:
+            # 渲染时指定视口，避免生成过大图片
             image_url = await self.html_render(html, {"full_page": True})
             return image_url
         except Exception as e:
             self._log(f"渲染失败: {e}", "error")
             return None
 
+    # ---------- API 模式（内存优化：限制图片尺寸） ----------
     async def _fetch_image_from_api(self, task_cfg: Dict[str, Any]) -> Optional[bytes]:
         api_url = task_cfg.get("api_url")
         if not api_url:
             self._log("API 模式缺少 api_url", "error")
             return None
+
+        # 自动添加尺寸参数，减小内存占用（仅对 Lolicon 有效）
+        if "lolicon.app" in api_url and "size" not in api_url:
+            parsed = urllib.parse.urlparse(api_url)
+            query = dict(urllib.parse.parse_qsl(parsed.query))
+            query["size"] = "regular"   # 可选: original, regular, small, thumb, mini
+            new_query = urllib.parse.urlencode(query)
+            api_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
+            self._log(f"添加尺寸参数后 URL: {api_url}", "debug")
+
         method = task_cfg.get("api_method", "GET")
         headers = task_cfg.get("api_headers", {})
         params = task_cfg.get("api_params", {})
         response_type = task_cfg.get("api_response_type", "json")
         image_key = task_cfg.get("api_image_key", "")
+
+        session = await self._get_session()
         try:
-            async with aiohttp.ClientSession() as sess:
-                if method.upper() == "GET":
-                    async with sess.get(api_url, headers=headers, params=params, timeout=30) as resp:
-                        if resp.status != 200:
-                            self._log(f"API 请求失败 {resp.status}", "error")
-                            return None
-                        if response_type == "json":
-                            data = await resp.json()
-                            if image_key:
-                                keys = image_key.split('.')
-                                val = data
-                                for k in keys:
-                                    if isinstance(val, list):
-                                        try:
-                                            idx = int(k)
-                                            val = val[idx] if idx < len(val) else None
-                                        except:
-                                            val = None
-                                            break
-                                    elif isinstance(val, dict):
-                                        val = val.get(k)
-                                    else:
+            if method.upper() == "GET":
+                async with session.get(api_url, headers=headers, params=params, timeout=30) as resp:
+                    if resp.status != 200:
+                        self._log(f"API 请求失败 {resp.status}", "error")
+                        return None
+                    if response_type == "json":
+                        data = await resp.json()
+                        # 解析图片 URL
+                        img_url = None
+                        if image_key:
+                            keys = image_key.split('.')
+                            val = data
+                            for k in keys:
+                                if isinstance(val, list):
+                                    try:
+                                        idx = int(k)
+                                        val = val[idx] if idx < len(val) else None
+                                    except:
                                         val = None
                                         break
-                                if val and isinstance(val, str) and val.startswith("http"):
-                                    async with sess.get(val) as img_resp:
-                                        if img_resp.status == 200:
-                                            return await img_resp.read()
-                            else:
-                                if isinstance(data, str) and data.startswith("http"):
-                                    async with sess.get(data) as img_resp:
-                                        if img_resp.status == 200:
-                                            return await img_resp.read()
+                                elif isinstance(val, dict):
+                                    val = val.get(k)
                                 else:
-                                    self._log("无法从 JSON 提取图片 URL", "error")
+                                    val = None
+                                    break
+                            if val and isinstance(val, str) and val.startswith("http"):
+                                img_url = val
                         else:
-                            return await resp.read()
+                            if isinstance(data, str) and data.startswith("http"):
+                                img_url = data
+                        if img_url:
+                            # 下载图片二进制（带流式读取）
+                            async with session.get(img_url) as img_resp:
+                                if img_resp.status == 200:
+                                    # 使用 read() 读取全部，但可考虑流式写入磁盘，不过简单起见
+                                    return await img_resp.read()
+                        else:
+                            self._log("无法从 JSON 提取图片 URL", "error")
+                    else:
+                        # binary
+                        return await resp.read()
         except Exception as e:
             self._log(f"API 请求异常: {e}", "error")
         return None
 
+    # ---------- 执行任务 ----------
     async def _execute_task(self, task: Dict[str, Any]):
         umo = task.get("umo", "")
         if not umo:
@@ -179,28 +214,39 @@ class TimerImagePlugin(Star):
             mode = "render" if task.get("template") else "api"
         self._log(f"任务模式: {mode}")
 
-        if mode == "render":
-            image_url = await self._render_image_from_template(task)
-            if not image_url:
-                return
-            msg_chain = [Image.fromURL(image_url)]
-        else:
-            img_bytes = await self._fetch_image_from_api(task)
-            if not img_bytes:
-                self._log("API 获取图片失败", "error")
-                return
-            msg_chain = [Image.fromBytes(img_bytes)]
-
-        if task.get("at_all", False):
-            msg_chain.insert(0, At(qq="all"))
-
+        msg_chain = None
         try:
+            if mode == "render":
+                image_url = await self._render_image_from_template(task)
+                if not image_url:
+                    return
+                msg_chain = [Image.fromURL(image_url)]
+            else:
+                img_bytes = await self._fetch_image_from_api(task)
+                if not img_bytes:
+                    self._log("API 获取图片失败", "error")
+                    return
+                msg_chain = [Image.fromBytes(img_bytes)]
+
+            if task.get("at_all", False):
+                msg_chain.insert(0, At(qq="all"))
+
             wrapper = _MessageWrapper(msg_chain)
             await self.context.send_message(umo, wrapper)
             self._log(f"图片已发送至 {umo}")
         except Exception as e:
             self._log(f"发送失败: {e}", "error")
+        finally:
+            # 释放大对象内存
+            if msg_chain:
+                for item in msg_chain:
+                    if hasattr(item, 'data') and isinstance(item.data, bytes):
+                        del item.data
+                del msg_chain
+            # 强制垃圾回收（非必须，但有助于释放大块内存）
+            gc.collect()
 
+    # ---------- 调度循环 ----------
     async def _run_task(self, idx: int, task: Dict[str, Any]):
         time_str = task.get("time", "")
         if not time_str:
@@ -226,14 +272,19 @@ class TimerImagePlugin(Star):
             self._log(f"执行任务 {idx} at {time_str}")
             await self._execute_task(task)
 
+    # ---------- 终止清理 ----------
     async def terminate(self):
         self._log("正在终止所有定时任务...")
         for t in getattr(self, '_my_tasks', []):
             t.cancel()
         if self._my_tasks:
             await asyncio.gather(*self._my_tasks, return_exceptions=True)
+        # 关闭共享会话
+        if self._session and not self._session.closed:
+            await self._session.close()
         self._log("所有任务已终止")
 
+    # ---------- 热重载命令 ----------
     @filter.command("timerimage_reload")
     async def reload_cmd(self, event):
         admins = self.context.get_config().get("admins_id", [])
