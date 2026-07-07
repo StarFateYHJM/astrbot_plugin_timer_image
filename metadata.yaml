@@ -1,0 +1,6 @@
+name: astrbot_plugin_timer_image
+plugin_type: plugin
+version: 1.0.0
+description: 定时发送图片插件，支持“HTML渲染模式”（自定义模板+LLM生成内容）和“API搬运模式”（直接调用二次元图片接口），双模式可混合配置。
+author: YHJM
+dependencies: []
