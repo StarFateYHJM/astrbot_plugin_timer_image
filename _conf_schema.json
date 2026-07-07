@@ -4,6 +4,16 @@
     "description": "开启调试日志",
     "default": false
   },
+  "image_size": {
+    "type": "string",
+    "description": "图片尺寸：original, regular, small, thumb, mini",
+    "default": "regular"
+  },
+  "render_template": {
+    "type": "text",
+    "description": "HTML渲染模板（支持 {{background}}, {{title}}, {{author}}, {{pid}}, {{tags}}）",
+    "default": "<html><body style='margin:0; background: {{background}}; background-size: cover; display:flex; align-items:flex-end; justify-content:center; height:100vh;'><div style='background:rgba(0,0,0,0.5); color:white; padding:20px; width:100%; text-align:center;'><h2>{{title}}</h2><p>作者：{{author}} | PID：{{pid}}</p><p>{{tags}}</p></div></body></html>"
+  },
   "tasks": {
     "type": "template_list",
     "description": "定时任务",
@@ -20,6 +30,11 @@
             "type": "string",
             "description": "目标UMO（格式：Bot名称:消息类型:会话ID）",
             "default": ""
+          },
+          "enable_render": {
+            "type": "bool",
+            "description": "是否启用HTML渲染（覆盖图片）",
+            "default": false
           },
           "at_all": {
             "type": "bool",
