@@ -43,7 +43,7 @@
           },
           "umo": {
             "type": "string",
-            "description": "目标UMO（如：星恒梦落:GroupMessage:3384188179_1098977006）",
+            "description": "目标UMO（格式：Bot名称:消息类型:会话ID，请根据实际运行环境填写）",
             "default": ""
           },
           "mode": {
