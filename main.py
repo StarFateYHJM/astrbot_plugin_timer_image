@@ -21,6 +21,8 @@ class _MessageWrapper:
 # ---------- 插件主类 ----------
 @register("astrbot_plugin_timer_image", "YHJM", "定时发送图片插件（渲染+API双模式）", "2.0.0")
 class TimerImagePlugin(Star):
+    config_schema = {}
+    
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         self.config = config if isinstance(config, dict) else {}
