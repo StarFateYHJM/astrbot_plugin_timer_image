@@ -1,16 +1,13 @@
 import asyncio
 import json
-import base64
-import mimetypes
 import gc
-import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 import aiohttp
 from astrbot.api.star import Context, Star, register
-from astrbot.api.message_components import Image, Plain, At
+from astrbot.api.message_components import Image, At
 from astrbot.api.event import filter
 from astrbot.api import logger
 
@@ -18,174 +15,67 @@ class _MessageWrapper:
     def __init__(self, chain):
         self.chain = chain
 
-@register("astrbot_plugin_timer_image", "YHJM", "定时发送图片插件（渲染+API双模式）", "1.0.0")
-class TimerImagePlugin(Star):
+@register("astrbot_plugin_lolicon_timer", "YHJM", "定时发送Lolicon二次元图片", "1.0.0")
+class LoliconTimerPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         self.config = config if isinstance(config, dict) else {}
         self.tasks = self.config.get("tasks", [])
         self.debug = self.config.get("debug_mode", False)
 
+        # 共享 HTTP 会话
         self._session = None
-        self._init_paths()
+
+        # 启动定时任务
         self._my_tasks = []
         for i, task in enumerate(self.tasks):
             t = asyncio.create_task(self._run_task(i, task))
             self._my_tasks.append(t)
 
-        logger.info(f"[TimerImage] 已加载 {len(self.tasks)} 个任务")
-
-    def _init_paths(self):
-        from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-        path = get_astrbot_data_path()
-        self.data_dir = (Path(path) if isinstance(path, str) else path) / "plugin_data" / self.name
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.backgrounds_dir = self.data_dir / "backgrounds"
-        self.backgrounds_dir.mkdir(exist_ok=True)
+        logger.info(f"[LoliconTimer] 已加载 {len(self.tasks)} 个任务")
 
     def _log(self, msg: str, level: str = "info"):
         if self.debug or level != "debug":
-            getattr(logger, level)(f"[TimerImage] {msg}")
+            getattr(logger, level)(f"[LoliconTimer] {msg}")
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
 
-    def resolve_background(self, user_input: str) -> str:
-        if not user_input:
-            return ""
-        if user_input.startswith(("http://", "https://")):
-            return user_input
-        local_path = self.backgrounds_dir / user_input
-        if not local_path.exists():
-            self._log(f"背景图不存在: {user_input}", "warning")
-            return ""
-        try:
-            mime_type, _ = mimetypes.guess_type(str(local_path))
-            mime_type = mime_type or "image/png"
-            with open(local_path, "rb") as f:
-                data = base64.b64encode(f.read()).decode("utf-8")
-            return f"data:{mime_type};base64,{data}"
-        except Exception as e:
-            self._log(f"读取背景图失败: {e}", "error")
-            return ""
-
-    async def _generate_text(self, prompt: str) -> str:
-        if not self.config.get("use_llm", False):
-            return ""
-        api_base = self.config.get("api_base", "https://api.deepseek.com/v1")
-        api_key = self.config.get("api_key", "")
-        model = self.config.get("model", "deepseek-v4-flash")
-        system_prompt = self.config.get("system_prompt", "请用中文回复。")
-        if not api_key:
-            self._log("LLM 未配置 api_key", "error")
-            return ""
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 1024,
-            "temperature": 0.8
-        }
+    async def _fetch_image(self) -> Optional[bytes]:
+        """从 Lolicon API 获取图片二进制数据"""
+        api_url = "https://api.lolicon.app/setu/v2?r18=0&num=1"
         session = await self._get_session()
         try:
-            async with session.post(f"{api_base}/chat/completions", json=payload, headers=headers, timeout=30) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            self._log(f"LLM 调用失败: {e}", "error")
-        return ""
-
-    async def _render_image_from_template(self, task_cfg: Dict[str, Any]) -> Optional[str]:
-        template = task_cfg.get("template", "")
-        if not template:
-            self._log("渲染模式缺少 template", "error")
-            return None
-        content = ""
-        if task_cfg.get("use_llm", False) or self.config.get("use_llm", False):
-            prompt = task_cfg.get("prompt", "生成一段温馨的每日问候语")
-            generated = await self._generate_text(prompt)
-            if generated:
-                content = generated
-        html = template.replace("{{content}}", content)
-        bg_input = task_cfg.get("background", "")
-        bg_data = self.resolve_background(bg_input) if bg_input else ""
-        if bg_data:
-            html = html.replace("{{background}}", bg_data)
-        try:
-            image_url = await self.html_render(html, {"full_page": True})
-            return image_url
-        except Exception as e:
-            self._log(f"渲染失败: {e}", "error")
-            return None
-
-    async def _fetch_image_from_api(self, task_cfg: Dict[str, Any]) -> Optional[bytes]:
-        api_url = task_cfg.get("api_url")
-        if not api_url:
-            self._log("API 模式缺少 api_url", "error")
-            return None
-
-        if "lolicon.app" in api_url and "size" not in api_url:
-            parsed = urllib.parse.urlparse(api_url)
-            query = dict(urllib.parse.parse_qsl(parsed.query))
-            query["size"] = "regular"
-            new_query = urllib.parse.urlencode(query)
-            api_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
-            self._log(f"添加尺寸参数后 URL: {api_url}", "debug")
-
-        method = task_cfg.get("api_method", "GET")
-        headers = task_cfg.get("api_headers", {})
-        params = task_cfg.get("api_params", {})
-        response_type = task_cfg.get("api_response_type", "json")
-        image_key = task_cfg.get("api_image_key", "")
-
-        session = await self._get_session()
-        try:
-            if method.upper() == "GET":
-                async with session.get(api_url, headers=headers, params=params, timeout=30) as resp:
-                    if resp.status != 200:
-                        self._log(f"API 请求失败 {resp.status}", "error")
-                        return None
-                    if response_type == "json":
-                        data = await resp.json()
-                        img_url = None
-                        if image_key:
-                            keys = image_key.split('.')
-                            val = data
-                            for k in keys:
-                                if isinstance(val, list):
-                                    try:
-                                        idx = int(k)
-                                        val = val[idx] if idx < len(val) else None
-                                    except:
-                                        val = None
-                                        break
-                                elif isinstance(val, dict):
-                                    val = val.get(k)
-                                else:
-                                    val = None
-                                    break
-                            if val and isinstance(val, str) and val.startswith("http"):
-                                img_url = val
-                        else:
-                            if isinstance(data, str) and data.startswith("http"):
-                                img_url = data
-                        if img_url:
-                            async with session.get(img_url) as img_resp:
-                                if img_resp.status == 200:
-                                    return await img_resp.read()
-                        else:
-                            self._log("无法从 JSON 提取图片 URL", "error")
+            async with session.get(api_url, timeout=30) as resp:
+                if resp.status != 200:
+                    self._log(f"API 请求失败 {resp.status}", "error")
+                    return None
+                data = await resp.json()
+                if self.debug:
+                    self._log(f"API 返回数据: {json.dumps(data, ensure_ascii=False)[:300]}", "debug")
+                
+                # 提取图片 URL
+                img_url = None
+                if isinstance(data, dict) and 'data' in data and isinstance(data['data'], list) and len(data['data']) > 0:
+                    first = data['data'][0]
+                    if isinstance(first, dict) and 'urls' in first and isinstance(first['urls'], dict):
+                        img_url = first['urls'].get('original') or first['urls'].get('regular')
+                if not img_url:
+                    self._log("无法从 JSON 提取图片 URL", "error")
+                    return None
+                
+                # 下载图片
+                async with session.get(img_url) as img_resp:
+                    if img_resp.status == 200:
+                        return await img_resp.read()
                     else:
-                        return await resp.read()
+                        self._log(f"图片下载失败 {img_resp.status}", "error")
+                        return None
         except Exception as e:
-            self._log(f"API 请求异常: {e}", "error")
-        return None
+            self._log(f"请求异常: {e}", "error")
+            return None
 
     async def _execute_task(self, task: Dict[str, Any]):
         umo = task.get("umo", "")
@@ -193,39 +83,23 @@ class TimerImagePlugin(Star):
             self._log("任务缺少 umo", "error")
             return
 
-        mode = task.get("mode")
-        if not mode:
-            mode = "render" if task.get("template") else "api"
-        self._log(f"任务模式: {mode}")
+        img_bytes = await self._fetch_image()
+        if not img_bytes:
+            self._log("获取图片失败", "error")
+            return
 
-        msg_chain = None
+        msg_chain = [Image.fromBytes(img_bytes)]
+        if task.get("at_all", False):
+            msg_chain.insert(0, At(qq="all"))
+
         try:
-            if mode == "render":
-                image_url = await self._render_image_from_template(task)
-                if not image_url:
-                    return
-                msg_chain = [Image.fromURL(image_url)]
-            else:
-                img_bytes = await self._fetch_image_from_api(task)
-                if not img_bytes:
-                    self._log("API 获取图片失败", "error")
-                    return
-                msg_chain = [Image.fromBytes(img_bytes)]
-
-            if task.get("at_all", False):
-                msg_chain.insert(0, At(qq="all"))
-
             wrapper = _MessageWrapper(msg_chain)
             await self.context.send_message(umo, wrapper)
             self._log(f"图片已发送至 {umo}")
         except Exception as e:
             self._log(f"发送失败: {e}", "error")
         finally:
-            if msg_chain:
-                for item in msg_chain:
-                    if hasattr(item, 'data') and isinstance(item.data, bytes):
-                        del item.data
-                del msg_chain
+            del img_bytes
             gc.collect()
 
     async def _run_task(self, idx: int, task: Dict[str, Any]):
@@ -263,8 +137,30 @@ class TimerImagePlugin(Star):
             await self._session.close()
         self._log("所有任务已终止")
 
-    # ---------- 重载命令 ----------
-    @filter.command("timerimage_reload")
+    @filter.command("lolicon_send")
+    async def send_cmd(self, event, task_index: str = None):
+        """手动触发任务（序号从1开始），不填则执行第一个"""
+        admins = self.context.get_config().get("admins_id", [])
+        if str(event.get_sender_id()) not in admins:
+            yield event.plain_result("权限不足")
+            return
+        if not self.tasks:
+            yield event.plain_result("没有配置任何任务")
+            return
+        try:
+            idx = int(task_index) - 1 if task_index else 0
+        except ValueError:
+            yield event.plain_result("请输入有效数字序号")
+            return
+        if idx < 0 or idx >= len(self.tasks):
+            yield event.plain_result(f"序号超出范围，共 {len(self.tasks)} 个任务")
+            return
+        task = self.tasks[idx]
+        self._log(f"手动触发任务 {idx+1}: {task.get('time')} -> {task.get('umo')}")
+        await self._execute_task(task)
+        yield event.plain_result(f"任务 {idx+1} 已触发，请等待发送结果")
+
+    @filter.command("lolicon_reload")
     async def reload_cmd(self, event):
         admins = self.context.get_config().get("admins_id", [])
         if str(event.get_sender_id()) not in admins:
@@ -285,32 +181,3 @@ class TimerImagePlugin(Star):
             t = asyncio.create_task(self._run_task(i, task))
             self._my_tasks.append(t)
         yield event.plain_result(f"已重载，当前 {len(self.tasks)} 个任务")
-
-    # ---------- 手动触发命令 ----------
-    @filter.command("timerimage_send")
-    async def send_cmd(self, event, task_index: str = None):
-        """手动触发指定任务（序号从1开始），不填则执行第一个任务"""
-        admins = self.context.get_config().get("admins_id", [])
-        if str(event.get_sender_id()) not in admins:
-            yield event.plain_result("权限不足")
-            return
-
-        if not self.tasks:
-            yield event.plain_result("没有配置任何任务")
-            return
-
-        try:
-            idx = int(task_index) - 1 if task_index else 0
-        except ValueError:
-            yield event.plain_result("请输入有效的数字序号")
-            return
-
-        if idx < 0 or idx >= len(self.tasks):
-            yield event.plain_result(f"序号超出范围，共 {len(self.tasks)} 个任务")
-            return
-
-        task = self.tasks[idx]
-        self._log(f"手动触发任务 {idx+1}: {task.get('time')} -> {task.get('umo')}")
-
-        await self._execute_task(task)
-        yield event.plain_result(f"任务 {idx+1} 已触发，请等待发送结果")
