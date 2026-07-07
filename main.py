@@ -23,21 +23,17 @@ class _MessageWrapper:
 class TimerImagePlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
-        self.config = config or {}
+        self.config = config if isinstance(config, dict) else {}
         self.tasks = self.config.get("tasks", [])
         self.debug = self.config.get("debug_mode", False)
-
-        # 初始化数据目录（仅用于渲染模式的背景图）
+    
         self._init_paths()
-
-        # 记录所有定时协程
         self._task_coros = []
-
-        # 启动所有定时任务
+    
         for idx, task_cfg in enumerate(self.tasks):
             t = asyncio.create_task(self._run_scheduler(idx, task_cfg))
             self._task_coros.append(t)
-
+    
         logger.info(f"[TimerImage] 已加载 {len(self.tasks)} 个任务")
 
     # ---------- 初始化目录 ----------
